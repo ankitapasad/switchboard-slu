@@ -12,8 +12,6 @@ import time
 import os
 from torchvision import datasets, transforms
 
-seg_size = 1000000
-
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
@@ -34,7 +32,7 @@ class Net(nn.Module):
 class FC(nn.Module):
     def __init__(self, n_classes):
         super(FC, self).__init__()
-        self.fc = nn.Linear(seg_size, n_classes)
+        self.fc = nn.Linear(13, n_classes)
         nn.init.kaiming_normal_(self.fc.weight)
 
     def forward(self, x):
@@ -74,26 +72,20 @@ def load_data(pth, file2label):
     y = []
     for root, dirs, files in os.walk(pth):
         for name in files:
-            pre_ext = name.split(".")[0]
-            if name.endswith('wav') and pre_ext in file2label:
-                wav, _ = torchaudio.load(os.path.join(root,name))
-                wav = segment(wav.sum(1))
-                label = file2label[pre_ext]
-                x.append(wav)
-                y += [label]*wav.shape[0]
-    x = torch.cat(list(x))
-    y = torch.tensor(y)
+            prefix = name.split("_")[0]
+            if name.endswith('txt') and prefix in file2label:
+                feats = np.loadtxt(name)
+                label = file2label[prefix]
+                x.append(torch.tensor(feats).float())
+                y += [label]*feats.shape[0]
+    x = torch.cat(x, dim=0).cuda()
+    y = torch.tensor(y).cuda()
     return x, y
     
 def split(x, y):
-    temp = list(zip(x.numpy(), y.numpy()))
-    random.shuffle(temp)
-    x, y = zip(*temp)
-    x, y = torch.tensor(x).cuda(), torch.tensor(y).cuda()
-
-    """
     p = torch.randperm(y.shape[0])
-    x, y = x[p], y[p] """
+    x, y = x[p], y[p]
+    
     cut_point = 9*(y.shape[0]//10)
     trX, teX = x[:cut_point], x[cut_point:]
     trY, teY = y[:cut_point], y[cut_point:]
@@ -103,27 +95,22 @@ file2label, n_labels = load_labels("labels.lst")
 
 x, y = load_data(".", file2label)
 
-#unique, counts = np.unique(y.numpy(), return_counts=True)
-#print dict(zip(unique, counts))
-
-mu, std = x.mean(), x.std()
-x = (x - mu) / std
-
 trX, trY, teX, teY = split(x,y)
 print trX.shape, teX.shape
+quit()
 
 model = FC(n_labels).cuda()
 optimizer = optim.Adam(model.parameters())
 criterion = torch.nn.CrossEntropyLoss().cuda()
 
 s = time.time()
-for i in range(999):
+for i in range(9999):
     output = model(trX)
     loss = criterion(output, trY)
     loss.backward()
     optimizer.step()
     optimizer.zero_grad()
-    print "%s --- %s"%(i,loss.item())
+    #print "%s --- %s"%(i,loss.item())
 
     with torch.no_grad():
         output = model(teX)
