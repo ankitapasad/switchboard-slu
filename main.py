@@ -1,4 +1,3 @@
-import torchaudio
 import argparse
 import random
 import numpy as np
@@ -13,26 +12,29 @@ import os
 from torchvision import datasets, transforms
 
 class Net(nn.Module):
-    def __init__(self):
+    def __init__(self, n_classes):
         super(Net, self).__init__()
-        self.conv1 = nn.Conv1d(1, 8, 7, 3, 5, 2)
-        self.conv2 = nn.Conv1d(8, 32, 7, 3, 5, 2)
-        self.conv3 = nn.Conv1d(32, 64, 7, 3, 5, 2)
-        self.conv4 = nn.Conv1d(64, 128, 7, 3, 5, 2)
-        self.fc = nn.Linear(128*1234, 1)
+        self.conv1 = nn.Conv1d(13, 16, 5, 3, 3, 1)
+        self.conv2 = nn.Conv1d(16, 32, 5, 3, 3, 1)
+        self.conv3 = nn.Conv1d(32, 64, 5, 3, 3, 1)
+        self.conv4 = nn.Conv1d(64, 128, 5, 3, 3, 1)
+        self.pool = nn.MaxPool1d(7)
+        self.fc = nn.Linear(128, n_classes)
         nn.init.kaiming_normal_(self.fc.weight)
 
     def forward(self, x):
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.conv4(x).view(-1, 128*1234)
+        x = F.selu(self.conv1(x))
+        x = F.selu(self.conv2(x))
+        x = F.selu(self.conv3(x))
+        x = F.selu(self.conv4(x))
+        x = self.pool(x)
+        x = x.view(-1, 128)
         return self.fc(x)
         
 class FC(nn.Module):
-    def __init__(self, n_classes):
+    def __init__(self, input_dim, n_classes):
         super(FC, self).__init__()
-        self.fc = nn.Linear(13, n_classes)
+        self.fc = nn.Linear(input_dim, n_classes)
         nn.init.kaiming_normal_(self.fc.weight)
 
     def forward(self, x):
@@ -49,6 +51,12 @@ class AE(nn.Module):
     def forward(self, x):
         return self.fc2(F.relu(self.fc1(x)))
 
+def segment(x, size): 
+    x = x.transpose(0,1)
+    s = size*x.shape[0]
+    x = x[:, :s*(x.shape[1]//(size*x.shape[0]))]
+    x = x.view(x.shape[0], -1, size).transpose(0,1)
+    return x
 
 def load_labels(pth):
     curr_label = 0
@@ -64,9 +72,6 @@ def load_labels(pth):
                 file2label[fname[:-2]] = topic2label[topic]
     return file2label, curr_label
     
-def segment(x):
-    return x[:seg_size*(x.shape[0]//seg_size)].view(-1, seg_size)
-    
 def load_data(pth, file2label):
     x = []
     y = []
@@ -74,60 +79,69 @@ def load_data(pth, file2label):
         for name in files:
             prefix = name.split("_")[0]
             if name.endswith('txt') and prefix in file2label:
-                feats = np.loadtxt(name)
+                print name
+                feats = torch.tensor(np.loadtxt(os.path.join(root,name))).float()
+                print "original shape: ", feats.shape
+                feats = segment(feats, 500)
+                print "concatenated: ", feats.shape
                 label = file2label[prefix]
-                x.append(torch.tensor(feats).float())
+                x.append(feats)
                 y += [label]*feats.shape[0]
-    x = torch.cat(x, dim=0).cuda()
-    y = torch.tensor(y).cuda()
+    x = torch.cat(x, dim=0)
+    y = torch.tensor(y)
     return x, y
-    
-def split(x, y):
-    p = torch.randperm(y.shape[0])
-    x, y = x[p], y[p]
-    
-    cut_point = 9*(y.shape[0]//10)
-    trX, teX = x[:cut_point], x[cut_point:]
-    trY, teY = y[:cut_point], y[cut_point:]
-    return trX, trY, teX, teY
-              
+   
+     
 file2label, n_labels = load_labels("labels.lst")
 
-x, y = load_data(".", file2label)
 
-trX, trY, teX, teY = split(x,y)
-print trX.shape, teX.shape
+"""
+trX, trY = load_data("train", file2label)
+teX, teY = load_data("test", file2label)
+
+torch.save(trX, 'trX.pt')
+torch.save(trY, 'trY.pt')
+torch.save(teX, 'teX.pt')
+torch.save(teY, 'teY.pt')
+
+
 quit()
+"""
 
-model = FC(n_labels).cuda()
+b = 256
+
+trX = torch.load("trX.pt").cuda()
+trY = torch.load("trY.pt").cuda()
+teX = torch.load("teX.pt").cuda()
+teY = torch.load("teY.pt").cuda()
+print trX.shape, trY.shape, teX.shape, teY.shape
+
+
+for i in range(6):
+    print i, (trY == i).float().mean().item()
+
+for i in range(6):
+    print i, (teY == i).float().mean().item()
+
+
+model = Net(n_labels).cuda()
 optimizer = optim.Adam(model.parameters())
 criterion = torch.nn.CrossEntropyLoss().cuda()
 
 s = time.time()
 for i in range(9999):
-    output = model(trX)
-    loss = criterion(output, trY)
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
-    #print "%s --- %s"%(i,loss.item())
+    for batch_idx in range(trX.shape[0]//b):
+        start, end = batch_idx*b, (batch_idx+1)*b
+        data, target = trX[start:end], trY[start:end]
+        
+        output = model(data)
+        loss = criterion(output, target)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
 
     with torch.no_grad():
         output = model(teX)
         pred = output.data.max(1, keepdim=True)[1]
         acc = pred.eq(teY.view_as(pred)).sum().item() / float(len(teY))
         print "acc: ", acc
-
-
-"""
-s = x[:1]
-rec = model(x)
-
-s = s[0]*std + mu
-rec = rec[0]*std + mu
-
-print s
-print rec
-torchaudio.save('s.wav', s.unsqueeze(1).cpu(), sr)
-torchaudio.save('rec.wav', rec.unsqueeze(1).cpu(), sr)
-"""
